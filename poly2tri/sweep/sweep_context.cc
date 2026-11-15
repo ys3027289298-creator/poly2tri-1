@@ -31,6 +31,8 @@
 #include "sweep_context.h"
 #include <algorithm>
 #include "advancing_front.h"
+#include "sweep.h"
+#include <cmath>
 
 namespace p2t {
 
@@ -42,11 +44,25 @@ SweepContext::SweepContext(std::vector<Point*> polyline) : points_(std::move(pol
   af_middle_(nullptr),
   af_tail_(nullptr)
 {
+  contours_.push_back(points_);
+  // Validate before any Edge is constructed: duplicate coordinates otherwise
+  // die deep inside Edge with an unstructured runtime_error.
+  const SelfIntersectionInfo early_defect = DetectSelfIntersection(points_, 0);
+  if (early_defect.code == SI_DUPLICATE_POINT
+      || early_defect.code == SI_DEGENERATE_CONTOUR) {
+    throw SelfIntersectionError(early_defect);
+  }
   InitEdges(points_);
 }
 
 void SweepContext::AddHole(const std::vector<Point*>& polyline)
 {
+  contours_.push_back(polyline);
+  const SelfIntersectionInfo hole_defect =
+    DetectSelfIntersection(polyline, static_cast<int>(contours_.size()) - 1);
+  if (hole_defect.code != SI_NONE) {
+    throw SelfIntersectionError(hole_defect);
+  }
   InitEdges(polyline);
   for (auto i : polyline) {
     if (point_set_.insert(i).second) {
@@ -203,9 +219,101 @@ SweepContext::~SweepContext()
       delete ptr;
     }
 
+    for (auto ptr : adopted_triangles_) {
+      delete ptr;
+    }
+
+    for (auto ptr : adopted_points_) {
+      delete ptr;
+    }
+
     for (auto& i : edge_list) {
       delete i;
     }
+}
+
+void SweepContext::AdoptTriangle(Triangle* triangle)
+{
+  adopted_triangles_.push_back(triangle);
+}
+
+void SweepContext::AdoptPoint(Point* point)
+{
+  adopted_points_.push_back(point);
+}
+
+bool SweepContext::ValidateOrResolve()
+{
+  const SelfIntersectionInfo defect = DetectSelfIntersections(contours_);
+  if (defect.code == SI_NONE) {
+    return true;
+  }
+  if (self_intersection_policy_ == REJECT_SELF_INTERSECTION
+      || contours_.size() > 1 || !point_set_.empty()) {
+    // Even-odd resolution is defined for one self-intersecting outer
+    // contour. Holes and Steiner points keep the explicit reject path so
+    // that their constraints are never silently dropped.
+    throw SelfIntersectionError(defect);
+  }
+
+  EvenOddResolver resolver(contours_[0]);
+  resolver.Resolve();
+
+  double triangulated_area = 0.0;
+  for (const auto& loop : resolver.loops()) {
+    // A closed face walk repeats its first vertex at the end; poly2tri
+    // expects each contour vertex exactly once.
+    std::vector<Point*> loop_points = loop;
+    while (loop_points.size() > 1
+           && loop_points.front() == loop_points.back()) {
+      loop_points.pop_back();
+    }
+    // Each face gets private point copies: the sweep attaches Edge objects
+    // to points and deletes them with its context, so shared points would
+    // otherwise carry dangling edge pointers into the next face.
+    std::vector<Point*> face_points;
+    face_points.reserve(loop_points.size());
+    for (Point* point : loop_points) {
+      Point* copy = new Point(point->x, point->y);
+      face_points.push_back(copy);
+      AdoptPoint(copy);
+    }
+    SweepContext loop_context(face_points);
+    Sweep local_sweep;
+    local_sweep.Triangulate(loop_context);
+    for (Triangle* source : loop_context.GetTriangles()) {
+      // Map source triangle vertices onto the private face copies.
+      Point* mapped[3];
+      for (int vertex = 0; vertex < 3; ++vertex) {
+        const Point& source_point = *source->GetPoint(vertex);
+        auto match = std::find_if(face_points.begin(), face_points.end(),
+          [&](Point* candidate) {
+            return candidate->x == source_point.x
+              && candidate->y == source_point.y;
+          });
+        mapped[vertex] = *match;
+      }
+      Triangle* copy = new Triangle(*mapped[0], *mapped[1], *mapped[2]);
+      triangles_.push_back(copy);
+      AdoptTriangle(copy);
+      triangulated_area += 0.5 * std::fabs(
+        (source->GetPoint(1)->x - source->GetPoint(0)->x)
+          * (source->GetPoint(2)->y - source->GetPoint(0)->y)
+        - (source->GetPoint(1)->y - source->GetPoint(0)->y)
+          * (source->GetPoint(2)->x - source->GetPoint(0)->x));
+    }
+  }
+
+  const double expected_area = resolver.FilledArea();
+  const double scale = std::max(1.0, std::fabs(expected_area));
+  if (std::fabs(triangulated_area - expected_area) > 1e-9 * scale) {
+    SelfIntersectionInfo area_info;
+    area_info.code = SI_DEGENERATE_CONTOUR;
+    area_info.edge_index_a = 0;
+    area_info.contour_index = 0;
+    throw SelfIntersectionError(area_info);
+  }
+  return false;
 }
 
 } // namespace p2t

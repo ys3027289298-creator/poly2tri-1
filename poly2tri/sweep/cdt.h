@@ -81,6 +81,13 @@ public:
   void Triangulate();
 
   /**
+   * Choose how self-intersecting contours are handled. The default rejects
+   * them with a p2t::SelfIntersectionError before any sweep state is built.
+   * Does not change triangulation of simple polygons.
+   */
+  void SetSelfIntersectionPolicy(SelfIntersectionPolicy policy);
+
+  /**
    * Get CDT triangles
    */
   std::vector<Triangle*> GetTriangles();

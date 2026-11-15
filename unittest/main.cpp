@@ -33,6 +33,73 @@ BOOST_AUTO_TEST_CASE(BasicTest)
   }
 }
 
+BOOST_AUTO_TEST_CASE(SelfIntersectionRejectTest)
+{
+  // Bowtie quadrilateral: edges 0 and 2 cross at (0.5, 0.5).
+  std::vector<p2t::Point*> polyline{
+    new p2t::Point(0, 0), new p2t::Point(1, 1),
+    new p2t::Point(1, 0), new p2t::Point(0, 1)
+  };
+  p2t::CDT cdt{ polyline };
+  bool threw = false;
+  try {
+    cdt.Triangulate();
+  } catch (const p2t::SelfIntersectionError& error) {
+    threw = true;
+    BOOST_CHECK_EQUAL(error.code(), p2t::SI_PROPER_CROSSING);
+  }
+  BOOST_CHECK(threw);
+  for (const auto p : polyline) {
+    delete p;
+  }
+}
+
+BOOST_AUTO_TEST_CASE(SelfIntersectionEvenOddTest)
+{
+  std::vector<p2t::Point*> polyline{
+    new p2t::Point(0, 0), new p2t::Point(1, 1),
+    new p2t::Point(1, 0), new p2t::Point(0, 1)
+  };
+  p2t::CDT cdt{ polyline };
+  cdt.SetSelfIntersectionPolicy(p2t::RESOLVE_EVEN_ODD);
+  BOOST_CHECK_NO_THROW(cdt.Triangulate());
+  const auto result = cdt.GetTriangles();
+  BOOST_REQUIRE_EQUAL(result.size(), 2);
+  double area = 0.0;
+  for (const auto triangle : result) {
+    const p2t::Point* a = triangle->GetPoint(0);
+    const p2t::Point* b = triangle->GetPoint(1);
+    const p2t::Point* c = triangle->GetPoint(2);
+    area += 0.5 * std::fabs((b->x - a->x) * (c->y - a->y)
+                            - (b->y - a->y) * (c->x - a->x));
+  }
+  BOOST_CHECK_SMALL(area - 0.5, 1e-12);
+  for (const auto p : polyline) {
+    delete p;
+  }
+}
+
+BOOST_AUTO_TEST_CASE(DuplicatePointRejectTest)
+{
+  std::vector<p2t::Point*> polyline{
+    new p2t::Point(0, 0), new p2t::Point(1, 0),
+    new p2t::Point(1, 1), new p2t::Point(1, 1),
+    new p2t::Point(0, 1)
+  };
+  bool threw = false;
+  try {
+    p2t::CDT cdt{ polyline };
+    cdt.Triangulate();
+  } catch (const p2t::SelfIntersectionError& error) {
+    threw = true;
+    BOOST_CHECK_EQUAL(error.code(), p2t::SI_DUPLICATE_POINT);
+  }
+  BOOST_CHECK(threw);
+  for (const auto p : polyline) {
+    delete p;
+  }
+}
+
 BOOST_AUTO_TEST_CASE(QuadTest)
 {
   std::vector<p2t::Point*> polyline{ new p2t::Point(0, 0), new p2t::Point(0, 1),

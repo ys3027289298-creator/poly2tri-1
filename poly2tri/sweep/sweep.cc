@@ -41,6 +41,10 @@ namespace p2t {
 // Triangulate simple polygon with holes
 void Sweep::Triangulate(SweepContext& tcx)
 {
+  if (!tcx.ValidateOrResolve()) {
+    // Even-odd resolution already produced the final triangle list.
+    return;
+  }
   tcx.InitTriangulation();
   tcx.CreateAdvancingFront();
   // Sweep points; build mesh

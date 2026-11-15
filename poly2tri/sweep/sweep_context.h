@@ -31,6 +31,7 @@
 
 #pragma once
 
+#include "../common/self_intersection.h"
 #include <list>
 #include <vector>
 #include <cstddef>
@@ -55,6 +56,18 @@ public:
 explicit SweepContext(std::vector<Point*> polyline);
 /// Destructor
 ~SweepContext();
+
+/// Select how a non-simple contour is handled. Existing callers keep the
+/// default reject behaviour and identical output for simple polygons.
+void set_self_intersection_policy(SelfIntersectionPolicy policy)
+{
+  self_intersection_policy_ = policy;
+}
+
+SelfIntersectionPolicy self_intersection_policy() const
+{
+  return self_intersection_policy_;
+}
 
 void set_head(Point* p1);
 
@@ -93,6 +106,17 @@ void MeshClean(Triangle& triangle);
 
 std::vector<Triangle*> &GetTriangles();
 std::list<Triangle*> &GetMap();
+
+/// Runs the pre-sweep contour validation and, when requested, resolves the
+/// even-odd fill loops. Returns true when the regular sweep should run on
+/// the original points; false when an already triangulated result is stored.
+bool ValidateOrResolve();
+
+/// Takes ownership of a triangle created while triangulating resolved loops.
+void AdoptTriangle(Triangle* triangle);
+
+/// Takes ownership of a point created while splitting intersection edges.
+void AdoptPoint(Point* point);
 
 std::vector<Edge*> edge_list;
 
@@ -147,6 +171,14 @@ Point* head_;
 Point* tail_;
 
 Node *af_head_, *af_middle_, *af_tail_;
+
+/// Original contours, kept for validation and even-odd resolution.
+std::vector<std::vector<Point*> > contours_;
+/// Triangles created for resolved loops and owned by this context.
+std::vector<Triangle*> adopted_triangles_;
+/// Points created for intersection splits and owned by this context.
+std::vector<Point*> adopted_points_;
+SelfIntersectionPolicy self_intersection_policy_ = REJECT_SELF_INTERSECTION;
 
 void InitTriangulation();
 void InitEdges(const std::vector<Point*>& polyline);

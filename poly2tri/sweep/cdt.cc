@@ -47,6 +47,11 @@ void CDT::AddPoint(Point* point) {
   sweep_context_->AddPoint(point);
 }
 
+void CDT::SetSelfIntersectionPolicy(SelfIntersectionPolicy policy)
+{
+  sweep_context_->set_self_intersection_policy(policy);
+}
+
 void CDT::Triangulate()
 {
   sweep_->Triangulate(*sweep_context_);
