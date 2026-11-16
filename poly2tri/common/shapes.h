@@ -33,10 +33,12 @@
 
 #include "dll_symbol.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <iosfwd>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 namespace p2t {
@@ -326,5 +328,156 @@ inline void Triangle::IsInterior(bool b)
 
 /// Is this set a valid delaunay triangulation?
 P2T_DLL_SYMBOL bool IsDelaunay(const std::vector<p2t::Triangle*>&);
+
+/// Options controlling polyline topology repair.
+struct RepairOptions {
+  /// Points closer together than this distance are merged into one
+  /// (the first point of a run is kept). A value of 0 disables
+  /// distance-based merging; exact adjacent duplicates and the
+  /// resulting zero-length edges are always removed.
+  double merge_threshold = 0.0;
+  /// When true, RepairReport::original_indices is filled with the
+  /// input index of every surviving point.
+  bool keep_original_indices = false;
+};
+
+/// Statistics of a RepairPolyline call.
+struct RepairReport {
+  std::size_t points_before = 0; ///< Points in the input polyline.
+  std::size_t points_after = 0;  ///< Points in the repaired polyline.
+  double area_before = 0.0;      ///< Signed area before repair.
+  double area_after = 0.0;       ///< Signed area after repair (same sign as before).
+  /// Maps each repaired point to its index in the input polyline.
+  /// Only filled when RepairOptions::keep_original_indices is true.
+  std::vector<std::size_t> original_indices;
+};
+
+/// Signed (shoelace) area of a closed polyline. Positive means
+/// counter-clockwise.
+inline double SignedArea(const std::vector<Point*>& polyline)
+{
+  double area = 0.0;
+  const std::size_t n = polyline.size();
+  for (std::size_t i = 0; i < n; ++i) {
+    const Point& a = *polyline[i];
+    const Point& b = *polyline[(i + 1) % n];
+    area += a.x * b.y - b.x * a.y;
+  }
+  return 0.5 * area;
+}
+
+/// Repair the topology of an imported polygon polyline in place:
+///  * adjacent duplicate points are removed (including wrap-around),
+///  * dangling edges (spikes of the form p, q, p) are removed,
+///  * points closer than options.merge_threshold are merged,
+///  * zero-length edges are thereby eliminated,
+///  * the orientation (signed-area sign) of the contour is preserved.
+/// At least three points are always kept. The Point objects themselves
+/// are not modified; surviving points keep their identity, so the
+/// triangulation output of an already-clean polyline is unchanged.
+inline RepairReport RepairPolyline(std::vector<Point*>& polyline,
+                                   const RepairOptions& options = RepairOptions())
+{
+  RepairReport report;
+  report.points_before = polyline.size();
+  report.area_before = SignedArea(polyline);
+
+  const std::size_t n = polyline.size();
+  if (n == 0) {
+    return report;
+  }
+
+  typedef std::pair<Point*, std::size_t> IndexedPoint;
+
+  // Pair every point with its original index.
+  std::vector<IndexedPoint> pts;
+  pts.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    pts.push_back(IndexedPoint(polyline[i], i));
+  }
+
+  // 1. Drop adjacent duplicate points (zero-length edges), wrap-around included.
+  std::vector<IndexedPoint> dedup;
+  dedup.reserve(n);
+  for (const auto& e : pts) {
+    if (dedup.empty() || *e.first != *dedup.back().first) {
+      dedup.push_back(e);
+    }
+  }
+  while (dedup.size() > 1 && *dedup.front().first == *dedup.back().first) {
+    dedup.pop_back();
+  }
+
+  // 2. Remove dangling edges: spikes p, q, p (edge traversed out and back).
+  std::vector<IndexedPoint> despiked;
+  despiked.reserve(dedup.size());
+  for (const auto& e : dedup) {
+    if (despiked.size() >= 2 && *e.first == *despiked[despiked.size() - 2].first) {
+      despiked.pop_back(); // drop the spike tip q and the returning p
+    } else {
+      despiked.push_back(e);
+    }
+  }
+
+  // 3. Merge points closer than the threshold (greedy), always keeping
+  //    at least three points.
+  std::vector<IndexedPoint> merged;
+  merged.reserve(despiked.size());
+  const double tol = options.merge_threshold;
+  const double tol2 = tol * tol;
+  const std::size_t m = despiked.size();
+  for (std::size_t i = 0; i < m; ++i) {
+    const bool must_keep = merged.size() + (m - i) <= 3;
+    if (!must_keep && !merged.empty()) {
+      const Point& a = *despiked[i].first;
+      const Point& b = *merged.back().first;
+      const double dx = a.x - b.x, dy = a.y - b.y;
+      if (dx * dx + dy * dy < tol2) {
+        continue; // merge into the previously kept point
+      }
+    }
+    merged.push_back(despiked[i]);
+  }
+  // Wrap-around: first and last kept points too close -> drop the last.
+  while (merged.size() > 3) {
+    const Point& a = *merged.front().first;
+    const Point& b = *merged.back().first;
+    const double dx = a.x - b.x, dy = a.y - b.y;
+    if (dx * dx + dy * dy >= tol2) {
+      break;
+    }
+    merged.pop_back();
+  }
+
+  // 4. Preserve orientation: if the repair flipped the signed-area sign,
+  //    reverse the repaired polyline.
+  double area = 0.0;
+  for (std::size_t i = 0; i < merged.size(); ++i) {
+    const Point& a = *merged[i].first;
+    const Point& b = *merged[(i + 1) % merged.size()].first;
+    area += a.x * b.y - b.x * a.y;
+  }
+  area *= 0.5;
+  if ((report.area_before > 0.0 && area < 0.0) ||
+      (report.area_before < 0.0 && area > 0.0)) {
+    std::reverse(merged.begin(), merged.end());
+  }
+
+  // Write the repaired polyline back and fill the report.
+  polyline.clear();
+  polyline.reserve(merged.size());
+  for (const auto& e : merged) {
+    polyline.push_back(e.first);
+  }
+  report.points_after = polyline.size();
+  report.area_after = SignedArea(polyline);
+  if (options.keep_original_indices) {
+    report.original_indices.reserve(merged.size());
+    for (const auto& e : merged) {
+      report.original_indices.push_back(e.second);
+    }
+  }
+  return report;
+}
 
 }
