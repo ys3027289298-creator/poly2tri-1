@@ -327,4 +327,64 @@ inline void Triangle::IsInterior(bool b)
 /// Is this set a valid delaunay triangulation?
 P2T_DLL_SYMBOL bool IsDelaunay(const std::vector<p2t::Triangle*>&);
 
-}
+// ---------------------------------------------------------------------------
+// Boolean approximation on top of the existing triangulation.
+//
+// Both operands are triangulated with CDT, every triangle is kept or dropped
+// by testing its centroid against the other polygon (and its holes), and the
+// kept triangles are merged into the result outline by walking the edges that
+// border an unkept triangle. The approximation is exact up to the triangle
+// granularity of the two triangulations; self-intersecting input is rejected
+// up front through the library's std::runtime_error error path.
+// Implementations live in shapes.cc.
+// ---------------------------------------------------------------------------
+namespace boolean_approx {
+
+enum class Op { Intersection, Union, Difference };
+
+/// A polygon with optional holes, all rings given as ordered point loops.
+struct Region {
+  std::vector<Point> outer;
+  std::vector<std::vector<Point>> holes;
+};
+
+/// A single triangle with its own coordinate copies, safe to keep past the
+/// lifetime of the CDT that produced it.
+struct Tri {
+  Point a, b, c;
+
+  Point Centroid() const;
+  double Area() const;
+};
+
+struct Result {
+  std::vector<Tri> triangles;
+  /// Closed loops of the merged outline; outer and hole loops alike.
+  std::vector<std::vector<Point>> contours;
+  double area = 0.0;
+};
+
+/// Reject repeated points and non-adjacent intersecting edges so that invalid
+/// input fails through the library's std::runtime_error error path.
+P2T_DLL_SYMBOL void RequireSimpleRing(const std::vector<Point>& ring);
+
+/// Containment in a region: inside its outer ring and outside every hole.
+P2T_DLL_SYMBOL bool PointInRegion(const Point& p, const Region& region);
+
+/// Area of a region, subtracting its holes.
+P2T_DLL_SYMBOL double RegionArea(const Region& region);
+
+/// Triangulate a region and return its triangles (one CDT run).
+/// A positive spacing inserts an interior grid of Steiner points so the
+/// centroid test of Apply() resolves features smaller than a whole triangle.
+P2T_DLL_SYMBOL std::vector<Tri> Triangulate(const Region& region,
+                                            double spacing = 0.0);
+
+/// Boolean approximation of two triangulated regions.
+P2T_DLL_SYMBOL Result Apply(const Region& lhs, const Region& rhs, Op op,
+                            double spacing = 0.0);
+
+} // namespace boolean_approx
+
+} // namespace p2t
+

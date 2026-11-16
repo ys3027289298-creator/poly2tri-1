@@ -30,8 +30,13 @@
  */
 #include "shapes.h"
 
+#include "../sweep/cdt.h"
+
+#include <algorithm>
 #include <cassert>
 #include <iostream>
+#include <map>
+#include <utility>
 
 namespace p2t {
 
@@ -407,5 +412,380 @@ bool IsDelaunay(const std::vector<p2t::Triangle*>& triangles)
   }
   return true;
 }
+
+namespace boolean_approx {
+
+namespace {
+
+double Cross2(const Point& o, const Point& a, const Point& b)
+{
+  return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+}
+
+// Proper-or-boundary segment intersection, used by the simple-polygon check.
+bool SegmentsIntersect(const Point& p1, const Point& p2,
+                       const Point& q1, const Point& q2)
+{
+  const double d1 = Cross2(q1, q2, p1);
+  const double d2 = Cross2(q1, q2, p2);
+  const double d3 = Cross2(p1, p2, q1);
+  const double d4 = Cross2(p1, p2, q2);
+  if (((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0)) &&
+      ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))) {
+    return true;
+  }
+  const auto on_segment = [](const Point& a, const Point& b, const Point& c) {
+    return std::fabs(Cross2(a, b, c)) <= 1e-12 &&
+           std::min(a.x, b.x) - 1e-12 <= c.x && c.x <= std::max(a.x, b.x) + 1e-12 &&
+           std::min(a.y, b.y) - 1e-12 <= c.y && c.y <= std::max(a.y, b.y) + 1e-12;
+  };
+  return on_segment(q1, q2, p1) || on_segment(q1, q2, p2) ||
+         on_segment(p1, p2, q1) || on_segment(p1, p2, q2);
+}
+
+// Ray-casting containment in one ordered ring. The boundary itself is not
+// treated as inside: StrictlyInsideRegion() filters boundary points before
+// points are handed to the CDT, and an operand centroid on the other
+// polygon's edge is an ambiguous case that ray casting resolves one way.
+bool PointInRing(const Point& p, const std::vector<Point>& ring)
+{
+  bool inside = false;
+  const size_t n = ring.size();
+  for (size_t i = 0, j = n - 1; i < n; j = i++) {
+    const Point& a = ring[j];
+    const Point& b = ring[i];
+    const bool crosses = ((a.y > p.y) != (b.y > p.y));
+    if (crosses) {
+      const double x_hit = a.x + (p.y - a.y) * (b.x - a.x) / (b.y - a.y);
+      if (x_hit > p.x) {
+        inside = !inside;
+      }
+    }
+  }
+  return inside;
+}
+
+double RingArea(const std::vector<Point>& ring)
+{
+  double twice = 0.0;
+  for (size_t i = 0; i < ring.size(); ++i) {
+    const Point& a = ring[i];
+    const Point& b = ring[(i + 1) % ring.size()];
+    twice += a.x * b.y - b.x * a.y;
+  }
+  return 0.5 * std::fabs(twice);
+}
+
+bool OnRing(const Point& p, const std::vector<Point>& ring)
+{
+  for (size_t i = 0; i < ring.size(); ++i) {
+    const Point& a = ring[i];
+    const Point& b = ring[(i + 1) % ring.size()];
+    if (std::fabs(Cross2(a, b, p)) <= 1e-12 &&
+        std::min(a.x, b.x) - 1e-12 <= p.x && p.x <= std::max(a.x, b.x) + 1e-12 &&
+        std::min(a.y, b.y) - 1e-12 <= p.y && p.y <= std::max(a.y, b.y) + 1e-12) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Strictly inside the outer ring and outside every ring boundary/hole.
+bool StrictlyInsideRegion(const Point& p, const Region& region)
+{
+  if (!PointInRing(p, region.outer) || OnRing(p, region.outer)) {
+    return false;
+  }
+  for (const auto& hole : region.holes) {
+    if (PointInRing(p, hole)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<Tri> TriangulateRegion(const Region& region, double spacing)
+{
+  RequireSimpleRing(region.outer);
+  std::vector<Point*> outline;
+  for (const Point& p : region.outer) {
+    outline.push_back(new Point(p.x, p.y));
+  }
+  std::vector<std::vector<Point*>> hole_ptrs;
+  for (const auto& hole : region.holes) {
+    RequireSimpleRing(hole);
+    hole_ptrs.emplace_back();
+    for (const Point& p : hole) {
+      hole_ptrs.back().push_back(new Point(p.x, p.y));
+    }
+  }
+  // Interior Steiner grid, inserted through the existing CDT::AddPoint path,
+  // refines the triangulation so narrow overlaps get their own triangles.
+  std::vector<Point*> steiners;
+  if (spacing > 0.0) {
+    double xmin = region.outer[0].x, xmax = xmin;
+    double ymin = region.outer[0].y, ymax = ymin;
+    for (const Point& p : region.outer) {
+      xmin = std::min(xmin, p.x);
+      xmax = std::max(xmax, p.x);
+      ymin = std::min(ymin, p.y);
+      ymax = std::max(ymax, p.y);
+    }
+    for (double x = xmin + spacing * 0.5; x < xmax; x += spacing) {
+      for (double y = ymin + spacing * 0.5; y < ymax; y += spacing) {
+        Point candidate(x, y);
+        if (StrictlyInsideRegion(candidate, region)) {
+          steiners.push_back(new Point(x, y));
+        }
+      }
+    }
+  }
+  std::vector<Tri> out;
+  try {
+    CDT cdt(outline);
+    for (const auto& hole : hole_ptrs) {
+      cdt.AddHole(hole);
+    }
+    for (Point* s : steiners) {
+      cdt.AddPoint(s);
+    }
+    cdt.Triangulate();
+    for (Triangle* t : cdt.GetTriangles()) {
+      out.push_back(Tri{*t->GetPoint(0), *t->GetPoint(1), *t->GetPoint(2)});
+    }
+  } catch (...) {
+    for (Point* p : outline) {
+      delete p;
+    }
+    for (auto& hole : hole_ptrs) {
+      for (Point* p : hole) {
+        delete p;
+      }
+    }
+    for (Point* p : steiners) {
+      delete p;
+    }
+    throw;
+  }
+  for (Point* p : outline) {
+    delete p;
+  }
+  for (auto& hole : hole_ptrs) {
+    for (Point* p : hole) {
+      delete p;
+    }
+  }
+  for (Point* p : steiners) {
+    delete p;
+  }
+  return out;
+}
+
+// Key on exact coordinates so coincident edges from the two triangulations
+// collapse onto the same undirected edge.
+std::pair<std::pair<double, double>, std::pair<double, double>>
+EdgeKey(const Point& a, const Point& b)
+{
+  auto ka = std::make_pair(a.x, a.y);
+  auto kb = std::make_pair(b.x, b.y);
+  return ka < kb ? std::make_pair(ka, kb) : std::make_pair(kb, ka);
+}
+
+// Walk edges that occur exactly once among the kept triangles; each such
+// edge borders an unkept triangle and belongs to the merged outline. The
+// triangles always come from a single conforming triangulation, so boundary
+// edges form closed walks; a multimap with edge consumption also handles
+// several walks that touch at one vertex.
+std::vector<std::vector<Point>> ExtractContours(const std::vector<Tri>& kept)
+{
+  struct EdgeInfo {
+    Point from, to; // Directed as first seen.
+    int count = 0;
+  };
+  std::map<std::pair<std::pair<double, double>, std::pair<double, double>>,
+           EdgeInfo>
+      edges;
+  const auto record = [&](const Point& from, const Point& to) {
+    auto it = edges.find(EdgeKey(from, to));
+    if (it == edges.end()) {
+      edges.emplace(EdgeKey(from, to), EdgeInfo{from, to, 1});
+    } else {
+      ++it->second.count;
+    }
+  };
+  for (const Tri& t : kept) {
+    record(t.a, t.b);
+    record(t.b, t.c);
+    record(t.c, t.a);
+  }
+
+  using Key = std::pair<double, double>;
+  std::multimap<Key, Key> outgoing;
+  for (const auto& entry : edges) {
+    if (entry.second.count == 1) {
+      const EdgeInfo& e = entry.second;
+      outgoing.emplace(std::make_pair(e.from.x, e.from.y),
+                       std::make_pair(e.to.x, e.to.y));
+    }
+  }
+
+  std::vector<std::vector<Point>> contours;
+  while (!outgoing.empty()) {
+    std::vector<Point> loop;
+    const Key start = outgoing.begin()->first;
+    Key cur = start;
+    for (;;) {
+      loop.push_back(Point(cur.first, cur.second));
+      auto it = outgoing.find(cur);
+      if (it == outgoing.end()) {
+        break; // Non-closed chain: keep what was walked.
+      }
+      const Key nxt = it->second;
+      outgoing.erase(it);
+      cur = nxt;
+      if (cur == start) {
+        break;
+      }
+    }
+    contours.push_back(loop);
+  }
+  return contours;
+}
+
+} // namespace
+
+Point Tri::Centroid() const
+{
+  return Point((a.x + b.x + c.x) / 3.0, (a.y + b.y + c.y) / 3.0);
+}
+
+double Tri::Area() const
+{
+  return 0.5 * std::fabs((b.x - a.x) * (c.y - a.y) -
+                         (c.x - a.x) * (b.y - a.y));
+}
+
+void RequireSimpleRing(const std::vector<Point>& ring)
+{
+  const size_t n = ring.size();
+  if (n < 3) {
+    throw std::runtime_error("boolean_approx: ring needs at least 3 points");
+  }
+  for (size_t i = 0; i < n; ++i) {
+    if (ring[i].x == ring[(i + 1) % n].x && ring[i].y == ring[(i + 1) % n].y) {
+      throw std::runtime_error("boolean_approx: repeated point in ring");
+    }
+  }
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = i + 1; j < n; ++j) {
+      // Adjacent edges share exactly their common endpoint; all other pairs
+      // must be disjoint.
+      if ((j == i + 1) || (i == 0 && j == n - 1)) {
+        continue;
+      }
+      if (SegmentsIntersect(ring[i], ring[(i + 1) % n], ring[j],
+                            ring[(j + 1) % n])) {
+        throw std::runtime_error(
+            "boolean_approx: self-intersecting ring is not supported");
+      }
+    }
+  }
+}
+
+bool PointInRegion(const Point& p, const Region& region)
+{
+  if (!PointInRing(p, region.outer)) {
+    return false;
+  }
+  for (const auto& hole : region.holes) {
+    if (PointInRing(p, hole)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+double RegionArea(const Region& region)
+{
+  double area = RingArea(region.outer);
+  for (const auto& hole : region.holes) {
+    area -= RingArea(hole);
+  }
+  return area;
+}
+
+std::vector<Tri> Triangulate(const Region& region, double spacing)
+{
+  return TriangulateRegion(region, spacing);
+}
+
+Result Apply(const Region& lhs, const Region& rhs, Op op, double spacing)
+{
+  const std::vector<Tri> tris_a = TriangulateRegion(lhs, spacing);
+  const std::vector<Tri> tris_b = TriangulateRegion(rhs, spacing);
+
+  // Classify every triangle of both triangulations by its centroid.
+  std::vector<Tri> in_a, out_a, in_b, out_b;
+  for (const Tri& t : tris_a) {
+    (PointInRegion(t.Centroid(), rhs) ? in_a : out_a).push_back(t);
+  }
+  for (const Tri& t : tris_b) {
+    (PointInRegion(t.Centroid(), lhs) ? in_b : out_b).push_back(t);
+  }
+
+  Result result;
+  // The retained triangles form disjoint-interior sets, so result.area is
+  // exactly the sum of their areas:
+  //  - intersection: A's triangles whose centroid is inside B;
+  //  - difference:   A's triangles whose centroid is outside B;
+  //  - union:        A's outside triangles + B's outside triangles + the
+  //                  intersection piece (A's inside triangles). The overlap
+  //                  is added once, which makes the area identities hold:
+  //                  |A u B| = |A| + |B| - |A n B|,
+  //                  |A \\ B| = |A| - |A n B|.
+  std::vector<Tri> outline_a, outline_b;
+  switch (op) {
+  case Op::Intersection:
+    outline_a = in_a;
+    break;
+  case Op::Difference:
+    outline_a = out_a;
+    break;
+  case Op::Union:
+    outline_a.reserve(out_a.size() + in_a.size());
+    for (const Tri& t : out_a) {
+      outline_a.push_back(t);
+    }
+    for (const Tri& t : in_a) {
+      outline_a.push_back(t);
+    }
+    outline_b = out_b;
+    break;
+  }
+  result.triangles.reserve(outline_a.size() + outline_b.size());
+  for (const Tri& t : outline_a) {
+    result.triangles.push_back(t);
+    result.area += t.Area();
+  }
+  for (const Tri& t : outline_b) {
+    result.triangles.push_back(t);
+    result.area += t.Area();
+  }
+
+  // Walk the boundary of each side's own conforming triangle set; the two
+  // outlines coincide geometrically where the regions meet.
+  std::vector<std::vector<Point>> contours_a = ExtractContours(outline_a);
+  std::vector<std::vector<Point>> contours_b = ExtractContours(outline_b);
+  result.contours.reserve(contours_a.size() + contours_b.size());
+  for (auto& loop : contours_a) {
+    result.contours.push_back(std::move(loop));
+  }
+  for (auto& loop : contours_b) {
+    result.contours.push_back(std::move(loop));
+  }
+  return result;
+}
+
+} // namespace boolean_approx
 
 } // namespace p2t
