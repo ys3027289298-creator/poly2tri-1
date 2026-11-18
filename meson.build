@@ -15,7 +15,15 @@ if boost_test_dep.found()
 	test('Unit Test', executable('unittest', [
 		'unittest/main.cpp',
 		'unittest/TriangleTest.cpp',
-	], dependencies : [boost_test_dep, thread_dep], link_with : lib))
+		'unittest/TaubinSmoothingTest.cpp',
+	], dependencies : [boost_test_dep, thread_dep],
+	include_directories : include_directories('.'),
+	cpp_args : ['-DMESH_HAVE_BOOST_TEST'], link_with : lib))
+else
+	# No Boost: run the self-contained Taubin test through its shim.
+	test('Taubin Test', executable('taubin_unittest', [
+		'unittest/TaubinSmoothingTest.cpp',
+	], include_directories : include_directories('.')))
 endif
 
 poly2tri_dep = declare_dependency(include_directories : include, link_with : lib)
