@@ -30,3 +30,9 @@ target_link_libraries(test_poly2tri
 )
 
 add_test(NAME poly2tri COMMAND test_poly2tri)
+
+# Zero-dependency winding order tests: no Boost required, so they can run in
+# minimal build environments.
+add_executable(test_winding winding_test.cpp)
+target_link_libraries(test_winding PRIVATE poly2tri)
+add_test(NAME winding COMMAND test_winding)

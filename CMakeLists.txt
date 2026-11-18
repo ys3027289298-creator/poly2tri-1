@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 14)
 
 option(P2T_BUILD_TESTS "Build tests" OFF)
 option(P2T_BUILD_TESTBED "Build the testbed application" OFF)
+option(P2T_BUILD_BENCH "Build the winding normalization benchmark" OFF)
 
 file(GLOB SOURCES poly2tri/common/*.cc poly2tri/sweep/*.cc)
 file(GLOB HEADERS poly2tri/*.h poly2tri/common/*.h poly2tri/sweep/*.h)
@@ -21,6 +22,16 @@ endif()
 if(P2T_BUILD_TESTS)
     enable_testing()
     add_subdirectory(unittest)
+endif()
+
+if(P2T_BUILD_BENCH)
+    add_executable(winding_bench bench/winding_bench.cc)
+    target_link_libraries(winding_bench PRIVATE poly2tri)
+    # The benchmark is meaningless unoptimized; force -O2 in non-debug builds
+    # without changing the build type of the library itself.
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        target_compile_options(winding_bench PRIVATE -O2)
+    endif()
 endif()
 
 if(P2T_BUILD_TESTBED)
