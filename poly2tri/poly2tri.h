@@ -31,5 +31,6 @@
 
 #pragma once
 
+#include "common/boundary_loops.h"
 #include "common/shapes.h"
 #include "sweep/cdt.h"

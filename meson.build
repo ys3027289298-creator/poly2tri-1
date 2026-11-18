@@ -2,6 +2,7 @@ project('poly2tri', ['cpp'])
 
 include = include_directories('.')
 lib = static_library('poly2tri', sources : [
+	'poly2tri/common/boundary_loops.cc',
 	'poly2tri/common/shapes.cc',
 	'poly2tri/sweep/advancing_front.cc',
 	'poly2tri/sweep/cdt.cc',
@@ -14,6 +15,7 @@ boost_test_dep = dependency('boost', modules : [ 'filesystem', 'unit_test_framew
 if boost_test_dep.found()
 	test('Unit Test', executable('unittest', [
 		'unittest/main.cpp',
+		'unittest/BoundaryLoopsTest.cpp',
 		'unittest/TriangleTest.cpp',
 	], dependencies : [boost_test_dep, thread_dep], link_with : lib))
 endif
